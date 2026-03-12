@@ -5,276 +5,345 @@
 
 ---
 
-## 🟢 Currently Working On: Phase 3 — Ride Booking Core
+## 🟢 Currently Working On: Phase 4 — Real-time Notifications & Acceptance Flow
 
-**Goal:** Understand how a ride is requested and how the nearest driver is found.
-Three endpoints, one utility function. That's it.
+**Goal:** Add WebSocket support so drivers receive real-time ride request notifications and can accept/reject them.
+
+**Current status:** Phase 3 is complete. All endpoints working with auto-assignment. Now upgrading to real driver acceptance flow.
 
 ---
 
-### Step 1 — Haversine utility
-**File:** `backend/utils/haversine.py`
+### Step 1 — Install WebSocket dependencies
 
-This function takes two GPS coordinates and returns the straight-line distance i### Step 5 — After migration: Start Phase 3
-
-Once models are in the DB, move to:
-- `POST /drivers/register`
-- `PATCH /drivers/availability`
-- `PATCH /drivers/location`
-- `POST /rides/request` (find nearest available driver using Haversine)
-n km.
-It is used by `POST /rides/request` to rank all drivers by distance from the pickup point.
-
-```python
-from math import radians, sin, cos, sqrt, atan2
-
-def haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    """Returns distance in km between two GPS coordinates."""
-    R = 6371
-    lat1, lng1, lat2, lng2 = map(radians, [lat1, lng1, lat2, lng2])
-    dlat = lat2 - lat1
-    dlng = lng2 - lng1
-    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlng / 2) ** 2
-    return R * 2 * atan2(sqrt(a), sqrt(1 - a))
-
-BASE_FARE = 2.0       # flat charge just for booking (dollars)
-RATE_PER_KM = 1.5     # dollars per km
-
-def calculate_fare(distance_km: float) -> float:
-    return round(BASE_FARE + RATE_PER_KM * distance_km, 2)
+```bash
+pip install websockets
 ```
 
 ---
 
-### Step 2 — Driver schemas
-**File:** `backend/schemas/drivers.py`
+### Step 2 — Create WebSocket connection manager
+**File:** `backend/utils/websocket_manager.py`
+
+This manages active WebSocket connections for drivers and riders.
 
 ```python
-from pydantic import BaseModel
-from typing import Optional
+from typing import Dict
+from fastapi import WebSocket
 
-class DriverRegister(BaseModel):
-    current_lat: float
-    current_lng: float
-    vehicle_type: str = "car"
+class ConnectionManager:
+    def __init__(self):
+        # driver_id -> WebSocket
+        self.driver_connections: Dict[int, WebSocket] = {}
+        # ride_id -> WebSocket (for riders)
+        self.rider_connections: Dict[int, WebSocket] = {}
+    
+    async def connect_driver(self, driver_id: int, websocket: WebSocket):
+        await websocket.accept()
+        self.driver_connections[driver_id] = websocket
+    
+    async def connect_rider(self, ride_id: int, websocket: WebSocket):
+        await websocket.accept()
+        self.rider_connections[ride_id] = websocket
+    
+    def disconnect_driver(self, driver_id: int):
+        if driver_id in self.driver_connections:
+            del self.driver_connections[driver_id]
+    
+    def disconnect_rider(self, ride_id: int):
+        if ride_id in self.rider_connections:
+            del self.rider_connections[ride_id]
+    
+    async def send_to_driver(self, driver_id: int, message: dict):
+        if driver_id in self.driver_connections:
+            await self.driver_connections[driver_id].send_json(message)
+    
+    async def send_to_rider(self, ride_id: int, message: dict):
+        if ride_id in self.rider_connections:
+            await self.rider_connections[ride_id].send_json(message)
 
-class DriverLocationUpdate(BaseModel):
-    current_lat: float
-    current_lng: float
-
-class DriverOut(BaseModel):
-    id: int
-    user_id: int
-    current_lat: Optional[float]
-    current_lng: Optional[float]
-    vehicle_type: str
-    rating: float
-    total_rides: int
-
-    class Config:
-        from_attributes = True
+manager = ConnectionManager()
 ```
 
 ---
 
-### Step 3 — Ride schemas
-**File:** `backend/schemas/rides.py`
+### Step 3 — Add WebSocket endpoints
+**File:** `backend/routes/websocket.py`
 
 ```python
-from pydantic import BaseModel
-from typing import Optional
-
-class RideRequest(BaseModel):
-    pickup_lat: float
-    pickup_lng: float
-    dropoff_lat: float
-    dropoff_lng: float
-
-class RideOut(BaseModel):
-    id: int
-    rider_id: int
-    driver_id: Optional[int]
-    pickup_lat: float
-    pickup_lng: float
-    dropoff_lat: float
-    dropoff_lng: float
-    status: str
-    fare: Optional[float]
-    distance_km: Optional[float]
-
-    class Config:
-        from_attributes = True
-```
-
----
-
-### Step 4 — Driver routes
-**File:** `backend/routes/drivers.py`
-
-Two endpoints:
-- `POST /drivers/register` — logged-in user becomes a driver; saves their starting location.
-- `PATCH /drivers/location` — update driver's GPS (use this in Swagger to move drivers around for testing).
-
-```python
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+from utils.websocket_manager import manager
+from utils.oauth2 import get_current_user_ws
 from database import get_db
-from models.drivers import Driver
-from schemas.drivers import DriverRegister, DriverLocationUpdate, DriverOut
-from utils.oauth2 import get_current_user
+from sqlalchemy.ext.asyncio import AsyncSession
 
-router = APIRouter(prefix="/drivers", tags=["Drivers"])
+router = APIRouter(tags=["WebSocket"])
 
-@router.post("/register", response_model=DriverOut)
-async def register_driver(
-    data: DriverRegister,
-    db: AsyncSession = Depends(get_db),
-    current_user=Depends(get_current_user),
+@router.websocket("/ws/driver/{driver_id}")
+async def driver_websocket(
+    websocket: WebSocket,
+    driver_id: int
 ):
-    # Prevent duplicate registration
-    result = await db.execute(select(Driver).where(Driver.user_id == current_user.id))
-    if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Already registered as a driver")
+    await manager.connect_driver(driver_id, websocket)
+    try:
+        while True:
+            # Keep connection alive, receive any messages
+            data = await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect_driver(driver_id)
 
-    driver = Driver(
-        user_id=current_user.id,
-        current_lat=data.current_lat,
-        current_lng=data.current_lng,
-        vehicle_type=data.vehicle_type,
-    )
-    db.add(driver)
-    await db.commit()
-    await db.refresh(driver)
-    return driver
-
-
-@router.patch("/location", response_model=DriverOut)
-async def update_location(
-    data: DriverLocationUpdate,
-    db: AsyncSession = Depends(get_db),
-    current_user=Depends(get_current_user),
+@router.websocket("/ws/ride/{ride_id}")
+async def ride_websocket(
+    websocket: WebSocket,
+    ride_id: int
 ):
-    result = await db.execute(select(Driver).where(Driver.user_id == current_user.id))
-    driver = result.scalar_one_or_none()
-    if not driver:
-        raise HTTPException(status_code=404, detail="Driver profile not found")
-
-    driver.current_lat = data.current_lat
-    driver.current_lng = data.current_lng
-    await db.commit()
-    await db.refresh(driver)
-    return driver
+    await manager.connect_rider(ride_id, websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect_rider(ride_id)
 ```
 
 ---
 
-### Step 5 — Ride routes
+### Step 4 — Update Ride model to track notification attempts
+**File:** `backend/models/ride.py`
+
+Add these fields:
+
+```python
+notified_driver_ids = Column(String, nullable=True)  # comma-separated list of driver IDs already notified
+notification_attempt = Column(Integer, default=0)
+```
+
+Then create and run migration:
+```bash
+alembic revision --autogenerate -m "add notification tracking to rides"
+alembic upgrade head
+```
+
+---
+
+### Step 5 — Modify ride request endpoint
 **File:** `backend/routes/ride_req.py`
 
-This is the core of the system.
-`POST /rides/request` does:
-1. Fetch all drivers that have a location set
-2. Run Haversine for every driver against the pickup point
-3. Pick the closest one
-4. Calculate fare from pickup → dropoff distance
-5. Create the ride row and return it
+Update `POST /rides/request` to:
+1. Create ride with `driver_id=null` and `status="pending"`
+2. Find nearest driver
+3. Send WebSocket notification
+4. Return ride immediately (driver will accept later)
 
 ```python
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
-from database import get_db
-from models.ride import Ride
-from models.drivers import Driver
-from schemas.rides import RideRequest, RideOut
-from utils.oauth2 import get_current_user
-from utils.haversine import haversine, calculate_fare
-
-router = APIRouter(prefix="/rides", tags=["Rides"])
-
 @router.post("/request", response_model=RideOut)
 async def request_ride(
-    data: RideRequest,
+    ride_request: RideRequest,
     db: AsyncSession = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_user)
 ):
-    # 1. Fetch all drivers that have a location
+    # Find all available drivers
     result = await db.execute(
         select(Driver).where(
             Driver.current_lat.is_not(None),
-            Driver.current_lng.is_not(None),
+            Driver.current_lng.is_not(None)
         )
     )
-    drivers = result.scalars().all()
-
-    if not drivers:
+    available_drivers = result.scalars().all()
+    if not available_drivers:
         raise HTTPException(status_code=404, detail="No drivers available right now")
-
-    # 2. Find the nearest driver using Haversine
-    nearest = min(
-        drivers,
-        key=lambda d: haversine(data.pickup_lat, data.pickup_lng, d.current_lat, d.current_lng),
+    
+    # Rank by distance
+    sorted_drivers = sorted(
+        available_drivers,
+        key=lambda d: haversine(ride_request.pickup_lat, ride_request.pickup_lng, d.current_lat, d.current_lng)
     )
-
-    # 3. Calculate fare and distance (pickup → dropoff)
-    distance_km = haversine(data.pickup_lat, data.pickup_lng, data.dropoff_lat, data.dropoff_lng)
+    
+    # Calculate fare
+    distance_km = haversine(
+        ride_request.pickup_lat, ride_request.pickup_lng,
+        ride_request.dropoff_lat, ride_request.dropoff_lng
+    )
     fare = calculate_fare(distance_km)
-
-    # 4. Create the ride
+    
+    # Create ride WITHOUT assigning driver yet
     ride = Ride(
         rider_id=current_user.id,
-        driver_id=nearest.id,
-        pickup_lat=data.pickup_lat,
-        pickup_lng=data.pickup_lng,
-        dropoff_lat=data.dropoff_lat,
-        dropoff_lng=data.dropoff_lng,
+        driver_id=None,  # No driver assigned yet
+        pickup_lat=ride_request.pickup_lat,
+        pickup_lng=ride_request.pickup_lng,
+        dropoff_lat=ride_request.dropoff_lat,
+        dropoff_lng=ride_request.dropoff_lng,
         status="pending",
         distance_km=round(distance_km, 2),
         fare=fare,
+        notified_driver_ids="",
+        notification_attempt=0
     )
     db.add(ride)
     await db.commit()
     await db.refresh(ride)
+    
+    # Notify nearest driver via WebSocket
+    nearest_driver = sorted_drivers[0]
+    await manager.send_to_driver(nearest_driver.id, {
+        "type": "ride_request",
+        "ride_id": ride.id,
+        "pickup_lat": ride.pickup_lat,
+        "pickup_lng": ride.pickup_lng,
+        "dropoff_lat": ride.dropoff_lat,
+        "dropoff_lng": ride.dropoff_lng,
+        "fare": ride.fare,
+        "distance_km": ride.distance_km
+    })
+    
+    # Track that we notified this driver
+    ride.notified_driver_ids = str(nearest_driver.id)
+    ride.notification_attempt = 1
+    await db.commit()
+    
     return ride
+```
 
+---
 
-@router.get("/{ride_id}", response_model=RideOut)
-async def get_ride(
+### Step 6 — Add driver acceptance endpoints
+**File:** `backend/routes/drivers.py`
+
+Add these two new endpoints:
+
+```python
+@router.post("/accept-ride/{ride_id}", response_model=RideOut)
+async def accept_ride(
     ride_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_user)
 ):
+    # Get driver profile
+    result = await db.execute(select(Driver).where(Driver.user_id == current_user.id))
+    driver = result.scalars().first()
+    if not driver:
+        raise HTTPException(status_code=404, detail="Driver profile not found")
+    
+    # Get ride
     result = await db.execute(select(Ride).where(Ride.id == ride_id))
     ride = result.scalar_one_or_none()
     if not ride:
         raise HTTPException(status_code=404, detail="Ride not found")
+    
+    if ride.status != "pending":
+        raise HTTPException(status_code=400, detail="Ride is no longer available")
+    
+    # Assign driver and update status
+    ride.driver_id = driver.id
+    ride.status = "accepted"
+    await db.commit()
+    await db.refresh(ride)
+    
+    # Notify rider via WebSocket
+    await manager.send_to_rider(ride.id, {
+        "type": "ride_accepted",
+        "driver_id": driver.id,
+        "status": "accepted"
+    })
+    
     return ride
+
+
+@router.post("/reject-ride/{ride_id}")
+async def reject_ride(
+    ride_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    # Get driver profile
+    result = await db.execute(select(Driver).where(Driver.user_id == current_user.id))
+    driver = result.scalars().first()
+    if not driver:
+        raise HTTPException(status_code=404, detail="Driver profile not found")
+    
+    # Get ride
+    result = await db.execute(select(Ride).where(Ride.id == ride_id))
+    ride = result.scalar_one_or_none()
+    if not ride:
+        raise HTTPException(status_code=404, detail="Ride not found")
+    
+    # Find next nearest driver who hasn't been notified yet
+    notified_ids = [int(x) for x in ride.notified_driver_ids.split(",") if x]
+    
+    result = await db.execute(
+        select(Driver).where(
+            Driver.current_lat.is_not(None),
+            Driver.current_lng.is_not(None),
+            ~Driver.id.in_(notified_ids)
+        )
+    )
+    remaining_drivers = result.scalars().all()
+    
+    if not remaining_drivers:
+        # No more drivers available
+        ride.status = "cancelled"
+        await db.commit()
+        await manager.send_to_rider(ride.id, {
+            "type": "ride_cancelled",
+            "reason": "No drivers available"
+        })
+        return {"message": "No more drivers available, ride cancelled"}
+    
+    # Sort by distance and notify next one
+    sorted_drivers = sorted(
+        remaining_drivers,
+        key=lambda d: haversine(ride.pickup_lat, ride.pickup_lng, d.current_lat, d.current_lng)
+    )
+    next_driver = sorted_drivers[0]
+    
+    # Send notification
+    await manager.send_to_driver(next_driver.id, {
+        "type": "ride_request",
+        "ride_id": ride.id,
+        "pickup_lat": ride.pickup_lat,
+        "pickup_lng": ride.pickup_lng,
+        "dropoff_lat": ride.dropoff_lat,
+        "dropoff_lng": ride.dropoff_lng,
+        "fare": ride.fare,
+        "distance_km": ride.distance_km
+    })
+    
+    # Update tracking
+    ride.notified_driver_ids = f"{ride.notified_driver_ids},{next_driver.id}"
+    ride.notification_attempt += 1
+    await db.commit()
+    
+    return {"message": f"Notified next driver (ID: {next_driver.id})"}
 ```
 
 ---
 
-### Step 6 — Register routers in `main.py`
+### Step 7 — Register WebSocket router in main.py
 
-Make sure `backend/main.py` includes both routers:
+**File:** `backend/main.py`
 
 ```python
-from routes.drivers import router as drivers_router
-from routes.ride_req import router as rides_router
+from routes import websocket
 
-app.include_router(drivers_router)
-app.include_router(rides_router)
+app.include_router(websocket.router)
 ```
 
 ---
 
-### How to test it end-to-end
+### How to test the new flow
 
-1. **Register two users** via `POST /auth/register` — one will be the driver, one the rider.
-2. **Login as the driver**, call `POST /drivers/register` with a lat/lng (e.g. `28.6139, 77.2090`).
-3. **Login as the rider**, call `POST /rides/request` with pickup and dropoff coords.
-4. The response shows the assigned `driver_id`, the `distance_km`, and the calculated `fare`.
-5. Use `PATCH /drivers/location` to move the driver to a different position and request again to see a different result.
+1. **Start server**: `uvicorn backend.main:app --reload`
+2. **Open WebSocket client** (use a tool like Postman or a browser WebSocket client)
+3. **Connect driver**: `ws://localhost:8000/ws/driver/1` (replace 1 with actual driver ID)
+4. **Request ride** as a rider via REST API
+5. **Driver receives notification** in WebSocket connection
+6. **Driver accepts** via `POST /drivers/accept-ride/{ride_id}`
+7. **Rider gets notified** via their WebSocket connection
+
+---
+
+### Optional: Add timeout mechanism
+
+Create a background task that checks for pending rides older than 30 seconds and auto-notifies the next driver. This requires celery or similar, which can be Phase 5.
 
 ---
 
@@ -286,3 +355,13 @@ app.include_router(rides_router)
 - [x] User model
 - [x] JWT Auth (register + login)
 - [x] OAuth2PasswordRequestForm
+- [x] Driver and Ride models
+- [x] Alembic migrations for drivers and rides tables
+- [x] Haversine distance calculation utility
+- [x] Fare calculation (base + per-km rate)
+- [x] Driver registration endpoint
+- [x] Driver location update endpoint
+- [x] Ride request endpoint with nearest-driver matching
+- [x] Get ride details endpoint
+- [x] Phase 3: Ride Booking Core complete
+

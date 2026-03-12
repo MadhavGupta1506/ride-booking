@@ -32,33 +32,47 @@
 
 ---
 
-## 🔲 Phase 3 — Ride Booking Core
-> _Status: Up Next_
+## ✅ Phase 3 — Ride Booking Core
+> _Status: Complete_
 
 **Goal:** Understand how ride requests work and how the nearest driver is found.
 
 ### Driver Endpoints (`/drivers`)
-- [ ] `POST /drivers/register` — register a driver profile (with starting `current_lat` / `current_lng`)
-- [ ] `PATCH /drivers/location` — update driver's GPS position (useful for local testing)
+- [x] `POST /drivers/register` — register a driver profile (with starting `current_lat` / `current_lng`)
+- [x] `PATCH /drivers/location` — update driver's GPS position (useful for local testing)
 
 ### Rider Endpoints (`/rides`)
-- [ ] `POST /rides/request` — submit pickup + dropoff coords → Haversine finds nearest driver → ride row created & assigned
-- [ ] `GET /rides/{id}` — check ride details and assigned driver
+- [x] `POST /rides/request` — submit pickup + dropoff coords → Haversine finds nearest driver → ride row created & assigned
+- [x] `GET /rides/{id}` — check ride details and assigned driver
 
 ### Haversine Utility (`backend/utils/haversine.py`)
-- [ ] `haversine(lat1, lng1, lat2, lng2) -> float` — returns distance in km
-- [ ] Fare calculation — `base_fare + (rate_per_km × distance_km)`
-- [ ] Nearest-driver query — fetch all drivers, compute distance from pickup, return closest
+- [x] `haversine(lat1, lng1, lat2, lng2) -> float` — returns distance in km
+- [x] Fare calculation — `base_fare + (rate_per_km × distance_km)`
+- [x] Nearest-driver query — fetch all drivers, compute distance from pickup, return closest
 
 ---
 
-## 🔲 Phase 4 — Real-time (WebSockets)
-> _Status: Not Started_
+## 🔲 Phase 4 — Real-time Notifications & Acceptance Flow
+> _Status: Up Next_
 
+**Upgrade from auto-assignment to real driver notifications + acceptance:**
+
+### WebSocket Infrastructure
 - [ ] WebSocket connection manager (manage active connections per ride/user)
-- [ ] `WS /ws/ride/{ride_id}` — rider receives live driver location + status changes
 - [ ] `WS /ws/driver/{driver_id}` — driver receives incoming ride request notifications
-- [ ] Broadcast ride status changes to connected clients
+- [ ] `WS /ws/ride/{ride_id}` — rider receives live driver location + status changes
+
+### Driver Acceptance Flow
+- [ ] `POST /rides/{ride_id}/accept` — driver accepts ride request
+- [ ] `POST /rides/{ride_id}/reject` — driver rejects ride request
+- [ ] Timeout logic (30 sec) — if no response, notify next nearest driver
+- [ ] Fallback algorithm — rank drivers by distance, try next if rejected/timeout
+
+### Modified Ride Request Flow
+- [ ] Update `POST /rides/request` — create ride with `status=pending`, `driver_id=null`
+- [ ] Notify nearest driver via WebSocket
+- [ ] Update ride to `status=accepted` when driver accepts
+- [ ] Broadcast status changes to rider's WebSocket connection
 
 ---
 
@@ -103,8 +117,8 @@
 |-------|--------------------------|----------------|
 | 1     | Foundation               | ✅ Complete    |
 | 2     | Core Models & Migrations | ✅ Complete    |
-| 3     | Ride Booking Core        | 🔲 Up Next     |
-| 4     | Real-time WebSockets     | 🔲 Not Started |
+| 3     | Ride Booking Core        | ✅ Complete    |
+| 4     | Real-time WebSockets     | 🔲 Up Next     |
 | 5     | Auth & Security          | 🔲 Not Started |
 | 6     | Frontend                 | 🔲 Not Started |
 | 7     | Production Readiness     | 🔲 Not Started |

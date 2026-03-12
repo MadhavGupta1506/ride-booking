@@ -10,7 +10,7 @@ class Driver(Base):
     is_available = Column(Boolean, default=True)
     current_lat = Column(Float,nullable=True)  
     current_lng = Column(Float,nullable=True)
-    vechile_type = Column(String, default="Car")
+    vehicle_type = Column(String, default="Car")
     rating = Column(Float, default=5.0)
     total_rides = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
