@@ -1,3 +1,4 @@
 from models.users import User
-
-__all__ = ["User"]
+from models.drivers import Driver
+from models.ride import Ride
+__all__ = ["User","Driver","Ride"]

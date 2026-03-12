@@ -1,6 +1,6 @@
-from database import Base
+from base import Base
 from sqlalchemy import Column, Integer, String, DateTime
-
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 class role:
@@ -15,4 +15,4 @@ class User(Base):
     role = Column(String, default=role.RIDER)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
-        
+    driver = relationship("Driver", back_populates="user", uselist=False)

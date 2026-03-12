@@ -48,9 +48,10 @@ if config.config_file_name is not None:
 # ---------------------------------------------------------------------------
 # Import Base and all models so autogenerate can detect schema changes
 # ---------------------------------------------------------------------------
-from database import Base  # noqa: E402
+from base import Base  # noqa: E402  – does NOT trigger async engine creation
 import models.users  # noqa: E402  (backend/models/users.py)
-
+import models.drivers  # noqa: E402  (backend/models/drivers.py)
+import models.ride  # noqa: E402  (backend/models/ride.py)
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,
